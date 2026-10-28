@@ -8,7 +8,6 @@ import br.com.leitordocs.formats.DocxDoc
 import br.com.leitordocs.formats.Sniff
 import br.com.leitordocs.formats.XlsxDoc
 import br.com.leitordocs.pdf.PdfSource
-import java.io.File
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,25 +22,44 @@ sealed interface Loaded {
 object Loader {
     private const val MAX_BYTES = 100L * 1024 * 1024
 
-    suspend fun load(ctx: Context, uri: Uri): Loaded = withContext(Dispatchers.IO) {
+    /** Abre um arquivo recebido (WhatsApp, seletor) e o guarda na lista de recentes. */
+    suspend fun load(ctx: Context, uri: Uri): Loaded = guarded {
+        val name = displayName(ctx, uri)
+        val input = ctx.contentResolver.openInputStream(uri)
+            ?: return@guarded Loaded.Failure("Não foi possível abrir o arquivo.")
+        val bytes = input.use { readLimited(it) }
+        val kind = Sniff.kindOf(bytes)
+        unsupported(kind)?.let { return@guarded it }
+        val entry = RecentStore(ctx).add(name, kind, bytes)
+        open(ctx, entry, bytes)
+    }
+
+    /** Reabre um arquivo da lista de recentes. */
+    suspend fun loadRecent(ctx: Context, entry: RecentFile): Loaded = guarded {
+        val store = RecentStore(ctx)
+        val bytes = store.file(entry).readBytes()
+        store.touch(entry)
+        open(ctx, entry, bytes)
+    }
+
+    private fun open(ctx: Context, entry: RecentFile, bytes: ByteArray): Loaded = when (entry.kind) {
+        DocKind.PDF -> Loaded.Pdf(entry.name, PdfSource.open(RecentStore(ctx).file(entry)))
+        DocKind.DOCX -> Loaded.Docx(entry.name, DocxDoc.open(bytes))
+        DocKind.XLSX -> Loaded.Xlsx(entry.name, XlsxDoc.open(bytes))
+        else -> unsupported(entry.kind)!!
+    }
+
+    private fun unsupported(kind: DocKind): Loaded.Failure? = when (kind) {
+        DocKind.LEGACY_OFFICE -> Loaded.Failure(
+            "Este é um arquivo antigo (.doc ou .xls). Peça para a pessoa reenviar como .docx ou .xlsx.",
+        )
+        DocKind.UNKNOWN -> Loaded.Failure("Formato não suportado. Abro PDF, Word (.docx) e Excel (.xlsx).")
+        else -> null
+    }
+
+    private suspend fun guarded(block: suspend () -> Loaded): Loaded = withContext(Dispatchers.IO) {
         try {
-            val name = displayName(ctx, uri)
-            val input = ctx.contentResolver.openInputStream(uri)
-                ?: return@withContext Loaded.Failure("Não foi possível abrir o arquivo.")
-            val bytes = input.use { readLimited(it) }
-            when (Sniff.kindOf(bytes)) {
-                DocKind.PDF -> {
-                    val file = File(ctx.cacheDir, "aberto.pdf")
-                    file.writeBytes(bytes)
-                    Loaded.Pdf(name, PdfSource.open(file))
-                }
-                DocKind.DOCX -> Loaded.Docx(name, DocxDoc.open(bytes))
-                DocKind.XLSX -> Loaded.Xlsx(name, XlsxDoc.open(bytes))
-                DocKind.LEGACY_OFFICE -> Loaded.Failure(
-                    "Este é um arquivo antigo (.doc ou .xls). Peça para a pessoa reenviar como .docx ou .xlsx.",
-                )
-                DocKind.UNKNOWN -> Loaded.Failure("Formato não suportado. Abro PDF, Word (.docx) e Excel (.xlsx).")
-            }
+            block()
         } catch (e: SecurityException) {
             Loaded.Failure("PDF protegido por senha não é suportado.")
         } catch (e: Exception) {
