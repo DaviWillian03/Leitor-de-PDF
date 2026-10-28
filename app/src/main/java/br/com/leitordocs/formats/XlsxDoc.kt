@@ -130,6 +130,54 @@ class XlsxDoc private constructor(private val entries: LinkedHashMap<String, Byt
         dirty.add(path)
     }
 
+    /** Insere uma linha vazia na posição [at] (0 = primeira); as linhas de baixo descem. */
+    fun insertRow(sheet: Int, at: Int) {
+        val path = sheets[sheet].path
+        val doc = sheetDoc(path)
+        checkRowOpsAllowed(doc, deleting = null)
+        RowShifter.apply(doc, RowShift.Insert(at + 1))
+        dirty.add(path)
+    }
+
+    /** Exclui a linha [at] (0 = primeira); as linhas de baixo sobem. */
+    fun deleteRow(sheet: Int, at: Int) {
+        val path = sheets[sheet].path
+        val doc = sheetDoc(path)
+        checkRowOpsAllowed(doc, deleting = at + 1)
+        val sheetData = doc.getElementsByTagNameNS(NS_MAIN, "sheetData").item(0) as Element
+        sheetData.childElements()
+            .firstOrNull { it.localName == "row" && it.getAttribute("r").toIntOrNull() == at + 1 }
+            ?.let { sheetData.removeChild(it) }
+        RowShifter.apply(doc, RowShift.Delete(at + 1))
+        dirty.add(path)
+    }
+
+    /** Recusa casos em que deslocar linhas corromperia o arquivo (melhor avisar que estragar). */
+    private fun checkRowOpsAllowed(doc: Document, deleting: Int?) {
+        val tables = doc.getElementsByTagNameNS(NS_MAIN, "tablePart")
+        if (tables.length > 0) {
+            throw UnsupportedOperationException(
+                "Esta planilha tem uma Tabela formatada do Excel. Inserir ou excluir linhas nela não é suportado aqui.",
+            )
+        }
+        if (deleting == null) return
+        val fs = doc.getElementsByTagNameNS(NS_MAIN, "f")
+        for (i in 0 until fs.length) {
+            val f = fs.item(i) as Element
+            if (f.getAttribute("t") != "shared" || !f.hasAttribute("ref")) continue
+            val cell = f.parentNode as? Element ?: continue
+            if (parseRef(cell.getAttribute("r"))?.first == deleting - 1) {
+                throw UnsupportedOperationException(
+                    "Esta linha tem uma fórmula usada por outras células. Para não estragar a planilha, exclua-a no Excel.",
+                )
+            }
+        }
+    }
+
+    /** true se a aba tem fórmulas (o usuário deve conferir depois de inserir/excluir linhas). */
+    fun hasFormulas(sheet: Int): Boolean =
+        sheetDoc(sheets[sheet].path).getElementsByTagNameNS(NS_MAIN, "f").length > 0
+
     private fun isNumber(s: String): Boolean {
         val n = s.replace(',', '.')
         if (!NUMBER.matches(n)) return false

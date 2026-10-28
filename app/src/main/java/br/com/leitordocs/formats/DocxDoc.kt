@@ -83,6 +83,31 @@ class DocxDoc private constructor(private val entries: LinkedHashMap<String, Byt
         return r
     }
 
+    /** Exclui o parágrafo. Se for o único do seu bloco (ex.: célula de tabela), só apaga o texto. */
+    fun deleteParagraph(index: Int) {
+        val p = paragraphs()[index]
+        val parent = p.parentNode as Element
+        if (parent.childElements().count { it.localName == "p" } <= 1) {
+            setParagraph(index, "")
+            return
+        }
+        parent.removeChild(p)
+    }
+
+    /** Insere um parágrafo logo depois do [index], com o mesmo estilo dele. */
+    fun insertParagraphAfter(index: Int, text: String) {
+        val p = paragraphs()[index]
+        val np = doc.createElementNS(W, "w:p")
+        p.childNamed("pPr")?.let { pPr ->
+            val copy = pPr.cloneNode(true) as Element
+            // Não duplicar quebra de seção.
+            copy.childElements().filter { it.localName == "sectPr" }.forEach { copy.removeChild(it) }
+            np.appendChild(copy)
+        }
+        np.appendChild(newRun(text.replace('\n', ' ')))
+        p.parentNode.insertBefore(np, p.nextSibling)
+    }
+
     fun toBytes(): ByteArray {
         val out = LinkedHashMap(entries)
         out["word/document.xml"] = Xml.serialize(doc)
